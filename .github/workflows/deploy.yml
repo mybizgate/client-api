@@ -111,6 +111,8 @@ jobs:
             --exclude='deploy/' \
             --exclude='.env' \
             --exclude='.env.*' \
+            --exclude='.phpunit.cache/' \
+            --exclude='.phpunit.result.cache' \
             --exclude='tests/' \
             --exclude='node_modules/' \
             --exclude='database/database.sqlite' \
@@ -156,12 +158,17 @@ jobs:
           # The dedicated FTP account must be rooted at
           # /home/mybizgat/app/client-api before this workflow is enabled.
           server-dir: ./
+          state-name: .ftp-deploy-sync-state.json
           dangerous-clean-slate: false
+          log-level: minimal
+          timeout: 120000
           exclude: |
             **/.git*
             **/.git*/**
             **/.env
             **/.env.*
+            **/.phpunit.cache/**
+            **/.phpunit.result.cache
             **/database/database.sqlite
             **/storage/logs/**
             **/storage/framework/cache/data/**
