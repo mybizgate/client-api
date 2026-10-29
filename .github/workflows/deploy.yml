@@ -1,0 +1,218 @@
+name: Deploy Production
+
+on:
+  push:
+    branches:
+      - deploy
+  workflow_dispatch:
+
+concurrency:
+  group: production-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Test, package, deploy, and verify
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, xml, curl, zip, fileinfo, pdo, pdo_mysql, gd
+          coverage: none
+
+      - name: Validate Composer
+        run: composer validate --no-check-publish
+
+      - name: Install validation dependencies
+        run: |
+          composer install \
+            --prefer-dist \
+            --no-interaction \
+            --no-progress
+
+      - name: Prepare safe CI environment
+        run: |
+          cat > .env <<'EOF'
+          APP_NAME="MyBizGate Client API CI"
+          APP_ENV=testing
+          APP_KEY=
+          APP_DEBUG=false
+          APP_URL=http://localhost
+
+          LOG_CHANNEL=stderr
+          SESSION_DRIVER=array
+          CACHE_STORE=array
+          QUEUE_CONNECTION=sync
+          DB_CONNECTION=sqlite
+          EOF
+
+          touch database/database.sqlite
+          php artisan key:generate --force
+
+      - name: Validate Laravel
+        run: |
+          php artisan --version
+          php artisan route:list
+          php artisan test
+
+      - name: Install production dependencies
+        run: |
+          rm -rf vendor
+
+          composer install \
+            --no-dev \
+            --prefer-dist \
+            --no-interaction \
+            --no-progress \
+            --optimize-autoloader
+
+          composer check-platform-reqs --no-dev
+
+      - name: Generate deployment identity
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          DEPLOYED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          cat > bootstrap/deployment.json <<EOF
+          {
+            "commit": "$SHORT_SHA",
+            "deployed_at": "$DEPLOYED_AT"
+          }
+          EOF
+
+          php -r '
+          $deployment = json_decode(file_get_contents("bootstrap/deployment.json"), true, flags: JSON_THROW_ON_ERROR);
+          if (($deployment["commit"] ?? null) !== substr(getenv("GITHUB_SHA"), 0, 8)) {
+              fwrite(STDERR, "Deployment identity does not match GITHUB_SHA.\n");
+              exit(1);
+          }
+          '
+
+      - name: Prepare deployment package
+        run: |
+          mkdir -p deploy
+
+          rsync -a ./ deploy/ \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.agents/' \
+            --exclude='.aws/' \
+            --exclude='.codex/' \
+            --exclude='deploy/' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='tests/' \
+            --exclude='node_modules/' \
+            --exclude='database/database.sqlite' \
+            --exclude='storage/logs/*' \
+            --exclude='storage/framework/cache/data/*' \
+            --exclude='storage/framework/sessions/*' \
+            --exclude='storage/framework/views/*' \
+            --exclude='bootstrap/cache/*.php'
+
+          mkdir -p deploy/storage/logs
+          mkdir -p deploy/storage/framework/cache/data
+          mkdir -p deploy/storage/framework/sessions
+          mkdir -p deploy/storage/framework/views
+          mkdir -p deploy/bootstrap/cache
+
+      - name: Verify deployment package
+        run: |
+          test -f deploy/artisan
+          test -f deploy/composer.json
+          test -f deploy/composer.lock
+          test -f deploy/vendor/autoload.php
+          test -f deploy/bootstrap/app.php
+          test -f deploy/bootstrap/deployment.json
+          test -f deploy/routes/api.php
+
+          test ! -e deploy/.env
+          test ! -e deploy/.env.production
+          test ! -e deploy/bootstrap/cache/config.php
+          test ! -d deploy/vendor/phpunit
+          test -z "$(find deploy/bootstrap/cache -maxdepth 1 -type f -name '*.php' -print -quit)"
+
+          du -sh deploy
+
+      - name: Deploy Laravel via FTPS
+        uses: SamKirkland/FTP-Deploy-Action@v4.4.0
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          port: 21
+          local-dir: ./deploy/
+          # The dedicated FTP account must be rooted at
+          # /home/mybizgat/app/client-api before this workflow is enabled.
+          server-dir: ./
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/.env
+            **/.env.*
+            **/database/database.sqlite
+            **/storage/logs/**
+            **/storage/framework/cache/data/**
+            **/storage/framework/sessions/**
+            **/storage/framework/views/**
+            **/bootstrap/cache/*.php
+
+      - name: Verify live production
+        env:
+          HEALTH_URL: https://client-api.mybizgate.com/api/v1/health
+          INFO_URL: https://client-api.mybizgate.com/api/v1/info
+        run: |
+          EXPECTED="${GITHUB_SHA::8}"
+
+          for i in $(seq 1 12); do
+            if curl -fsSL \
+              -H 'Cache-Control: no-cache' \
+              -H 'Pragma: no-cache' \
+              "${HEALTH_URL}?nocache=${GITHUB_SHA}-${i}" \
+              --output /tmp/client-api-health.json; then
+              cat /tmp/client-api-health.json
+
+              if jq -e \
+                --arg commit "$EXPECTED" \
+                '.status == "ok"
+                  and .service == "MyBizGate Client API"
+                  and .environment == "production"
+                  and .deployment.commit == $commit' \
+                /tmp/client-api-health.json >/dev/null; then
+                echo "Production verified at commit $EXPECTED"
+                break
+              fi
+            fi
+
+            if [ "$i" -eq 12 ]; then
+              echo "Production does not report expected commit $EXPECTED"
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          curl -fsSL \
+            -H 'Cache-Control: no-cache' \
+            -H 'Pragma: no-cache' \
+            "${INFO_URL}?nocache=${GITHUB_SHA}" \
+            --output /tmp/client-api-info.json
+
+          cat /tmp/client-api-info.json
+          jq -e '
+            .name == "MyBizGate Client API"
+              and .api_version == "v1"
+              and .framework == "Laravel"
+          ' /tmp/client-api-info.json >/dev/null
