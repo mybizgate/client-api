@@ -161,6 +161,7 @@ jobs:
           state-name: .ftp-deploy-sync-state.json
           dangerous-clean-slate: false
           log-level: minimal
+          # Shared-hosting FTPS data channels can be slow during a baseline sync.
           timeout: 120000
           exclude: |
             **/.git*
