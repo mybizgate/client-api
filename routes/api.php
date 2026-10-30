@@ -1,9 +1,26 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\DummyDataController;
+use App\Http\Controllers\Api\DummyLoginController;
 use App\Http\Controllers\Api\TestUploadController;
+use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
+    Route::post('/auth/login', DummyLoginController::class)
+        ->middleware('throttle:5,1')
+        ->name('api.v1.auth.login');
+
+    Route::get('/products', [DummyDataController::class, 'products'])
+        ->name('api.v1.products.index');
+
+    Route::get('/client/config', [DummyDataController::class, 'clientConfig'])
+        ->name('api.v1.client.config');
+
+    Route::get('/categories', [DummyDataController::class, 'categories'])
+        ->name('api.v1.categories.index');
+
+    Route::get('/orders', [DummyDataController::class, 'orders'])
+        ->name('api.v1.orders.index');
 
     Route::get('/health', function () {
         $deployment = null;
