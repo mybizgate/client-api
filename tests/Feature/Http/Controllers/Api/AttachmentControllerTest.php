@@ -334,6 +334,6 @@ class AttachmentControllerTest extends TestCase
 
     public function test_health_reports_the_database_connection(): void
     {
-        $this->getJson('/api/v1/health')->assertOk()->assertJsonPath('database', true);
+        $this->getJson('/api/v1/health')->assertOk()->assertJsonPath('database', true)->assertJsonPath('database_error', null);
     }
 }

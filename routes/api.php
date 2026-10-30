@@ -62,11 +62,22 @@ Route::prefix('v1')->group(function () {
             }
         }
 
+        // Safe diagnostics only: the driver name and the numeric driver error
+        // code (1045 access denied, 1049 unknown database, 2002 cannot connect,
+        // sqlite 14 unable to open file). The message is never exposed because
+        // it contains the username and host.
+        $databaseError = null;
+
         try {
             DB::connection()->getPdo();
             $database = true;
-        } catch (Throwable) {
+        } catch (Throwable $e) {
             $database = false;
+            $previous = $e->getPrevious() ?? $e;
+            $databaseError = [
+                'driver' => (string) config('database.default'),
+                'code' => is_int($previous->getCode()) ? $previous->getCode() : (string) $previous->getCode(),
+            ];
         }
 
         return response()->json([
@@ -76,6 +87,7 @@ Route::prefix('v1')->group(function () {
             'environment' => app()->environment(),
             'deployment' => $deployment,
             'database' => $database,
+            'database_error' => $databaseError,
             'timestamp' => now()->toIso8601String(),
         ]);
     });
