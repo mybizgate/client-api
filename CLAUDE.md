@@ -6,13 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `client-api` is the **MyBizGate Client API**: a Laravel 13 (PHP ^8.3) JSON backend for the MyBizGate multi-tenant SME website platform. It is the business/domain API; the sibling `../media-api` (`media-api.mybizgate.com`) is the files/media API and must not be touched from here. The workspace `~/Workspace/mybizgate/` also holds `platform/` (deploy tooling), `clients/`, `templates/` and `uploads/`; the workspace root must never become a Git repository.
 
+**Before writing or changing anything that involves files, images, uploads or attachments, read
+`../media-api/attachment_integration.md`.** It is the contract between this API and media-api (endpoints, upload rules,
+error codes, the `media_attachments` table, the adapter, performance characteristics) and names `client-api` as the
+reference implementation. media-api keeps the bytes and `metadata.json`; this API stores only 26-char media ids and
+returns media-api URLs, never paths. `../media-api/README.md` is the full media-api reference and
+`../media-api/create_media_attachments.sql` is the MySQL copy of the attachments schema used on production.
+
 The canonical repo is `https://github.com/mybizgate/client-api` (branches `main` for development, `deploy` for production). This local directory is a clone of it (remote `origin` over SSH).
 
 `AGENTS.md` is a copy of the Laravel Boost bootstrap block (also reproduced at the bottom of this file). Keep the two in sync if you edit one. `README.md` is the stock Laravel README plus a short "Production Deployment" section; `CLIENT_API_DEPLOY.md` is the full deployment spec the workflow was built from.
 
 ## Commands
 
-Dev dependencies are **not** installed locally (`vendor/` was installed with `--no-dev`, so PHPUnit, Pint and Pail are missing and `php artisan test` reports "Command test is not defined"). Run `composer install` first. `node_modules/` is also absent.
+Dev dependencies (PHPUnit, Pint, Pail) are installed in `vendor/`; if `php artisan test` ever reports "Command test is not defined", `vendor/` was rebuilt with `--no-dev` and `composer install` fixes it. `node_modules/` is absent and only matters for the welcome page.
 
 ```sh
 composer install                 # installs dev deps (phpunit, pint, pail, pao)
@@ -22,44 +29,51 @@ php artisan serve                # API only, http://localhost:8000
 
 composer test                    # config:clear + php artisan test
 php artisan test --filter=test_info_endpoint_returns_service_information   # single test
+php artisan test --filter=AttachmentControllerTest                        # one class
 php artisan test tests/Feature/ExampleTest.php                            # single file
+php artisan route:list --path=attachments
 
 vendor/bin/pint                  # format (Laravel Pint, PSR-12 based)
 vendor/bin/pint --dirty          # only changed files
 
-php artisan migrate              # sqlite; database/database.sqlite does not exist yet
+php artisan migrate              # local MariaDB (see Database); tests use sqlite :memory: and need pdo_sqlite
 npm run build                    # vite, only needed for the welcome page
 ```
 
-Tests run against sqlite `:memory:`, array cache/session and the sync queue (see `phpunit.xml`), so they need no services. All tests live in `tests/Feature/ExampleTest.php` (welcome page, `/health`, `/info`, deployment identity) plus the stock unit test.
+Tests run against sqlite `:memory:`, array cache/session and the sync queue (see `phpunit.xml`), so they need no services, but the local PHP must have `pdo_sqlite` (`sudo apt install php8.3-sqlite3`). Without it, run the suite in a container: `podman run --rm -v "$PWD":/app -w /app docker.io/library/php:8.3-cli php artisan test` (the image has sqlite but no GD, which is why tests embed a 1x1 PNG instead of `UploadedFile::fake()->image()`). Tests: `tests/Feature/ExampleTest.php` (welcome page, `/health`, `/info`, deployment identity), the dummy controller tests, `tests/Unit/Services/MediaApiClientTest.php` and `tests/Feature/Http/Controllers/Api/AttachmentControllerTest.php` (media-api is always faked with `Http::fake()`; never call the real service from tests).
 
-Manual smoke test of the upload flow:
+Manual smoke test (media-api must be running on `:8001`, see `MEDIA_API_URL` in `.env`):
 
 ```sh
-curl -s http://localhost:8000/api/v1/health
+curl -s http://localhost:8000/api/v1/health            # "database": true when MariaDB is reachable
 curl -s http://localhost:8000/api/v1/info
-curl -s -H 'X-Client-Code: lzhub' -F file=@photo.jpg http://localhost:8000/api/v1/test/upload
+curl -s -H 'X-Client-Code: lzhub' -F file=@photo.jpg -F role=primary \
+  http://localhost:8000/api/v1/attachments/product/101  # uploads to media-api, stores the media_id
+curl -s -H 'X-Client-Code: lzhub' http://localhost:8000/api/v1/attachments/product/101
+curl -s -H 'X-Client-Code: lzhub' -F file=@photo.jpg http://localhost:8000/api/v1/test/upload   # legacy prototype
 ```
 
 ## Architecture
 
 **Routing.** Everything public lives in `routes/api.php` under `Route::prefix('v1')`; Laravel adds the `/api` prefix, so paths are `/api/v1/...`. `routes/web.php` only serves the stock welcome page (a test asserts `GET /` is 200, so keep it). The framework health endpoint is `/up`; the app's own is `/api/v1/health`. `bootstrap/app.php` forces JSON rendering for exceptions on `api/*`, so `abort()` calls in controllers become JSON errors automatically.
 
-**Health / info contract.** `/api/v1/health` returns `status`, `service`, `version`, `environment`, `deployment`, `database` (hard-coded `false`) and `timestamp`; `/api/v1/info` returns `name`, `api_version`, `framework`, `laravel_version`. The deploy workflow asserts on `status`, `service`, `environment == production`, `deployment.commit` and the three `/info` fields after every release, so changing those keys or values breaks deployment verification. `deployment` is read from `bootstrap/deployment.json` (`{commit, deployed_at}`), which CI generates from `GITHUB_SHA` and which is gitignored locally; when absent it must stay `null`, never an error.
+**Health / info contract.** `/api/v1/health` returns `status`, `service`, `version`, `environment`, `deployment`, `database` (`true` only when a PDO connection opens; never an exception) and `timestamp`; `/api/v1/info` returns `name`, `api_version`, `framework`, `laravel_version`. The deploy workflow asserts on `status`, `service`, `environment == production`, `deployment.commit` and the three `/info` fields after every release, so changing those keys or values breaks deployment verification. `deployment` is read from `bootstrap/deployment.json` (`{commit, deployed_at}`), which CI generates from `GITHUB_SHA` and which is gitignored locally; when absent it must stay `null`, never an error.
 
-**Tenancy model.** There is no auth or tenant table yet. The tenant is the `X-Client-Code` request header (default `lzhub`), validated against `^[a-z0-9-]+$`, and it only scopes storage paths: `tenants/{tenant}/products/{uuid}.webp`. Any new tenant-aware code should reuse that header and the same slug regex until a real auth/tenant layer exists.
+**Tenancy model.** There is no auth or tenant table yet. The tenant is the `X-Client-Code` request header. The prototype `/test/*` routes default it to `lzhub`; the `tenant` middleware alias (`App\Http\Middleware\ResolveTenant`, registered in `bootstrap/app.php`) used by real tenant-scoped routes **requires** it (`^[a-z0-9-]{2,50}$`, same contract as media-api, `400` otherwise) and exposes it as the `tenant` request attribute. The tenant never comes from a request body. Any new tenant-aware code should reuse that middleware until a real auth/tenant layer exists.
 
 **Storage.** All tenant files go through the `tenant_uploads` disk in `config/filesystems.php`. Its root is `TENANT_UPLOAD_PATH` (local `.env` points at `~/Workspace/mybizgate/uploads/client-api`, i.e. outside this repo and shared with the rest of the workspace; the variable is not in `.env.example`), falling back to `storage/app/uploads`. The disk has `throw => true`, so storage failures raise exceptions instead of returning false. Never serve files by building paths from raw user input; `TestUploadController::validatePath()` shows the expected sanitising (tenant regex + `basename` + filename regex).
 
 **Image pipeline.** `App\Http\Controllers\Api\TestUploadController` is the reference implementation: validate `jpg/jpeg/png/webp` up to 10 MB, convert with the GD extension to WebP (max 1600x1600, quality 80, alpha preserved), store under a UUID name, and return `view_url` / `download_url`. The `view` route sets `Cache-Control: public, max-age=86400`. The `/test/*` routes are prototypes; real media handling belongs to `media-api`, so prefer calling that service over growing this pipeline.
 
-**Database.** sqlite is configured but the API does not use it yet. Only the stock users/cache/jobs migrations exist. The `User` model and `UserFactory` are untouched Laravel defaults.
+**Media attachments (media-api integration).** Implements `../media-api/attachment_integration.md`. `App\Services\MediaApiClient` is the only code that talks to media-api (`services.media_api.base_url`, env `MEDIA_API_URL`): `upload`, `metadata`, `assign`, `delete`, plus `urls()` which derives `view_url`/`thumbnail_url`/… from a media id without a round trip. `App\Services\AttachmentService` holds the rules (upload-then-link, verify-then-assign-then-link, singleton roles replace their slot, detach never deletes in media-api, a failed row after an upload logs the orphaned `media_id`). `config/attachments.php` is the allowlist of entity types (`product`, `service`, `business` → media-api `module`) and roles (`primary`/`logo` singleton image, `gallery` images, `attachment` any type). Routes (all behind `tenant`): `GET|POST /api/v1/attachments/{entityType}/{entityId}` and `DELETE /api/v1/attachments/{attachmentId}`. Responses are `{"data": …}` with media-api URLs only, never paths. Only the 26-char `media_id` is stored.
+
+**Database.** MySQL/MariaDB everywhere except tests: the local `.env` points at the workspace MariaDB (`127.0.0.1:3306`, database `mybizgat_platform`); `.env.example` is the single sectioned template for local and production (section A = the values that differ, each with its `production:` value commented), and production uses the server-managed `.env` at `/home/mybizgat/app/client-api/.env`. Tables: the stock users/cache/jobs migrations, `sample` (demo CRUD behind `App\Http\Controllers\Api\SampleController`, `Route::apiResource('sample')` at `/api/v1/sample`; copy its shape for real resources and drop it when a real one exists) plus `media_attachments` (`database/migrations/2026_10_30_000000_create_media_attachments_table.php`, mirrored by `../media-api/create_media_attachments.sql` for phpMyAdmin). Production has no SSH and the FTPS deploy never runs `php artisan migrate`, so every migration must also be applied by hand there: `database/schema/mysql-schema.sql` (from `php artisan schema:dump`, re-run and commit after every migration) is the full schema plus `migrations` rows to paste into phpMyAdmin on first install; later migrations are applied as the SQL from `php artisan migrate --pretend` plus an `INSERT` into `migrations` (procedure in README "Database schema on production"). Keep `../media-api/create_media_attachments.sql` in sync with the attachments migration too. `/api/v1/health` reports `database: true` only when a PDO connection can be opened. media-api itself has no database and never reads `media_attachments`. The `User` model and `UserFactory` are untouched Laravel defaults.
 
 ## Deployment
 
 Production is shared hosting with **no SSH**: `.github/workflows/deploy.yml` runs on every push to `deploy` (and on `workflow_dispatch`), then tests, packages and uploads via FTPS. Release flow is `git checkout deploy && git merge main && git push origin deploy`; `main` never auto-deploys.
 
-The workflow, in order: PHP 8.3 with gd; `composer install` (with dev) and `php artisan test` + `route:list` against a throwaway CI `.env`; then `rm -rf vendor` and `composer install --no-dev --optimize-autoloader`; write `bootstrap/deployment.json`; rsync into `deploy/` excluding `.git`, `.github`, `tests/`, `.env*`, `node_modules`, runtime `storage/*` data and `bootstrap/cache/*.php`; FTPS upload with `SamKirkland/FTP-Deploy-Action` to the FTP account root (which is `/home/mybizgat/app/client-api`, `server-dir: ./`); finally poll `/api/v1/health` up to 12x10s until it reports the pushed short SHA, then check `/api/v1/info`. A failing test fails the release, so do not skip or weaken tests to get a deploy through.
+The workflow, in order: PHP 8.3 with gd, pdo_mysql and pdo_sqlite (the feature tests need sqlite); `composer install` (with dev) and `php artisan test` + `route:list` against a throwaway CI `.env`; then `rm -rf vendor` and `composer install --no-dev --optimize-autoloader`; write `bootstrap/deployment.json`; rsync into `deploy/` excluding `.git`, `.github`, `tests/`, `.env*`, `node_modules`, runtime `storage/*` data and `bootstrap/cache/*.php`; FTPS upload with `SamKirkland/FTP-Deploy-Action` to the FTP account root (which is `/home/mybizgat/app/client-api`, `server-dir: ./`); finally poll `/api/v1/health` up to 12x10s until it reports the pushed short SHA, then check `/api/v1/info`. A failing test fails the release, so do not skip or weaken tests to get a deploy through.
 
 Server layout that must not change: Laravel lives at `/home/mybizgat/app/client-api`, the public entry `/home/mybizgat/public_html/client-api/index.php` points at it, and the production `.env` is server-managed and never deployed (`dangerous-clean-slate: false`, `.env*` excluded). Secrets are GitHub environment `production` secrets `FTP_SERVER`, `FTP_USERNAME`, `FTP_PASSWORD`. Production vendor is built in CI; never run Composer on the host.
 

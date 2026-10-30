@@ -73,3 +73,55 @@ Health: https://client-api.mybizgate.com/api/v1/health
 
 Push to the `deploy` branch to deploy through GitHub Actions. The production
 `.env` is server-managed and is never deployed.
+
+### Environment
+
+`.env.example` is the single template for every environment. Section **A** holds the only values that differ
+between local development and production (each line carries its `production:` value as a comment); section **B**
+is identical everywhere. Tests ignore the file (`phpunit.xml` forces sqlite `:memory:`).
+
+Local: `cp .env.example .env && php artisan key:generate && php artisan migrate` against the workspace MariaDB.
+
+Production (`/home/mybizgat/app/client-api/.env`): copy `.env.example` and set section A to
+
+```env
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=https://client-api.mybizgate.com
+APP_KEY=                      # php artisan key:generate --show, generated once, never changed
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=mybizgat_platform # cPanel database for client-api
+DB_USERNAME=                  # cPanel MySQL user granted on that database
+DB_PASSWORD=
+TENANT_UPLOAD_PATH=/home/mybizgat/data/client-api/uploads
+MEDIA_API_URL=https://media-api.mybizgate.com/api/v1
+LOG_LEVEL=warning
+```
+
+### Database schema on production
+
+The deploy never runs migrations. The schema travels as `database/schema/mysql-schema.sql`, generated from the
+local MariaDB with `php artisan schema:dump` (every table plus the rows of the `migrations` table, no data, no
+credentials). Keep `cache`, `session` and `queue` on the file/sync drivers so no extra tables are needed at runtime.
+
+First install:
+
+1. cPanel → MySQL Databases: create the database and a user, grant the user all privileges on it, put them in the
+   production `.env` (`DB_*`).
+2. cPanel → phpMyAdmin → select the database → SQL tab → paste the whole `database/schema/mysql-schema.sql` → Go.
+   **Only on an empty database**: the file starts every table with `DROP TABLE IF EXISTS`, so re-running it on a
+   live database destroys all data.
+3. `curl https://client-api.mybizgate.com/api/v1/health` must report `"database": true`.
+
+Every later migration:
+
+1. Write the migration, then **before** running it locally capture its SQL:
+   `php artisan migrate --pretend` (prints the statements without executing).
+2. `php artisan migrate` locally, then `php artisan schema:dump` and commit the refreshed schema file.
+3. In phpMyAdmin run the captured statements, then record the migration so Laravel never tries to run it again:
+   `INSERT INTO migrations (migration, batch) VALUES ('<file name without .php>', <last batch + 1>);`
+   (the `INSERT` lines at the bottom of the schema file show the exact format).
+
+Never run `php artisan migrate:fresh` or `schema:dump --prune`; the migration files stay the source of truth.

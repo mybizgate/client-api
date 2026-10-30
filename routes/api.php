@@ -1,8 +1,11 @@
 <?php
 
+use App\Http\Controllers\Api\AttachmentController;
 use App\Http\Controllers\Api\DummyDataController;
 use App\Http\Controllers\Api\DummyLoginController;
+use App\Http\Controllers\Api\SampleController;
 use App\Http\Controllers\Api\TestUploadController;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
@@ -21,6 +24,24 @@ Route::prefix('v1')->group(function () {
 
     Route::get('/orders', [DummyDataController::class, 'orders'])
         ->name('api.v1.orders.index');
+
+    // Attachments of business records, backed by media-api
+    // (see ../media-api/attachment_integration.md). X-Client-Code is mandatory.
+    Route::middleware('tenant')->prefix('attachments')->group(function () {
+        Route::get('/{entityType}/{entityId}', [AttachmentController::class, 'index'])
+            ->name('api.v1.attachments.index');
+
+        Route::post('/{entityType}/{entityId}', [AttachmentController::class, 'store'])
+            ->name('api.v1.attachments.store');
+
+        Route::delete('/{attachmentId}', [AttachmentController::class, 'destroy'])
+            ->name('api.v1.attachments.destroy');
+    });
+
+    // Demo CRUD over the "sample" table: proves the database connection end to end.
+    Route::apiResource('sample', SampleController::class)
+        ->parameters(['sample' => 'id'])
+        ->whereNumber('id');
 
     Route::get('/health', function () {
         $deployment = null;
@@ -41,13 +62,20 @@ Route::prefix('v1')->group(function () {
             }
         }
 
+        try {
+            DB::connection()->getPdo();
+            $database = true;
+        } catch (Throwable) {
+            $database = false;
+        }
+
         return response()->json([
             'status' => 'ok',
             'service' => 'MyBizGate Client API',
             'version' => '0.1.0',
             'environment' => app()->environment(),
             'deployment' => $deployment,
-            'database' => false,
+            'database' => $database,
             'timestamp' => now()->toIso8601String(),
         ]);
     });
