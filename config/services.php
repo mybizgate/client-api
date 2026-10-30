@@ -14,6 +14,12 @@ return [
     |
     */
 
+    // media-api (../media-api): file bytes + metadata live there, this API
+    // stores only media ids. See media-api/attachment_integration.md.
+    'media_api' => [
+        'base_url' => env('MEDIA_API_URL', 'https://media-api.mybizgate.com/api/v1'),
+    ],
+
     'postmark' => [
         'key' => env('POSTMARK_API_KEY'),
     ],
