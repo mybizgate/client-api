@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`client-api` is the **MyBizGate Client API**: a Laravel 13 (PHP ^8.3) JSON backend for the MyBizGate multi-tenant SME website platform. It lives inside the non-Git workspace `~/Workspace/mybizgate/` next to `platform/` (deploy tooling), `clients/`, `templates/` and `uploads/`. The workspace root must never become a Git repository; this directory currently has no `.git` of its own either.
+`client-api` is the **MyBizGate Client API**: a Laravel 13 (PHP ^8.3) JSON backend for the MyBizGate multi-tenant SME website platform. It is the business/domain API; the sibling `../media-api` (`media-api.mybizgate.com`) is the files/media API and must not be touched from here. The workspace `~/Workspace/mybizgate/` also holds `platform/` (deploy tooling), `clients/`, `templates/` and `uploads/`; the workspace root must never become a Git repository.
 
-`AGENTS.md` at this level is a copy of the Laravel Boost bootstrap block (also reproduced at the bottom of this file). Keep the two in sync if you edit one.
+The canonical repo is `https://github.com/mybizgate/client-api` (branches `main` for development, `deploy` for production). This local directory is a clone of it (remote `origin` over SSH).
+
+`AGENTS.md` is a copy of the Laravel Boost bootstrap block (also reproduced at the bottom of this file). Keep the two in sync if you edit one. `README.md` is the stock Laravel README plus a short "Production Deployment" section; `CLIENT_API_DEPLOY.md` is the full deployment spec the workflow was built from.
 
 ## Commands
 
-Dev dependencies are **not** currently installed (`vendor/` was installed with `--no-dev`, so PHPUnit, Pint and Pail are missing and `php artisan test` reports "Command test is not defined"). Run `composer install` first. `node_modules/` is also absent.
+Dev dependencies are **not** installed locally (`vendor/` was installed with `--no-dev`, so PHPUnit, Pint and Pail are missing and `php artisan test` reports "Command test is not defined"). Run `composer install` first. `node_modules/` is also absent.
 
 ```sh
 composer install                 # installs dev deps (phpunit, pint, pail, pao)
@@ -19,8 +21,8 @@ composer dev                     # php artisan dev: server + queue + logs + vite
 php artisan serve                # API only, http://localhost:8000
 
 composer test                    # config:clear + php artisan test
-php artisan test --filter=ExampleTest            # single test class / method
-php artisan test tests/Feature/ExampleTest.php   # single file
+php artisan test --filter=test_info_endpoint_returns_service_information   # single test
+php artisan test tests/Feature/ExampleTest.php                            # single file
 
 vendor/bin/pint                  # format (Laravel Pint, PSR-12 based)
 vendor/bin/pint --dirty          # only changed files
@@ -29,31 +31,43 @@ php artisan migrate              # sqlite; database/database.sqlite does not exi
 npm run build                    # vite, only needed for the welcome page
 ```
 
-Tests run against sqlite `:memory:`, array cache/session and the sync queue (see `phpunit.xml`), so they need no services.
+Tests run against sqlite `:memory:`, array cache/session and the sync queue (see `phpunit.xml`), so they need no services. All tests live in `tests/Feature/ExampleTest.php` (welcome page, `/health`, `/info`, deployment identity) plus the stock unit test.
 
 Manual smoke test of the upload flow:
 
 ```sh
 curl -s http://localhost:8000/api/v1/health
+curl -s http://localhost:8000/api/v1/info
 curl -s -H 'X-Client-Code: lzhub' -F file=@photo.jpg http://localhost:8000/api/v1/test/upload
 ```
 
 ## Architecture
 
-**Routing.** Everything public lives in `routes/api.php` under `Route::prefix('v1')`; Laravel adds the `/api` prefix, so paths are `/api/v1/...`. `routes/web.php` only serves the stock welcome page. The framework health endpoint is `/up`; the app's own is `/api/v1/health`. `bootstrap/app.php` forces JSON rendering for exceptions on `api/*`, so `abort()` calls in controllers become JSON errors automatically.
+**Routing.** Everything public lives in `routes/api.php` under `Route::prefix('v1')`; Laravel adds the `/api` prefix, so paths are `/api/v1/...`. `routes/web.php` only serves the stock welcome page (a test asserts `GET /` is 200, so keep it). The framework health endpoint is `/up`; the app's own is `/api/v1/health`. `bootstrap/app.php` forces JSON rendering for exceptions on `api/*`, so `abort()` calls in controllers become JSON errors automatically.
+
+**Health / info contract.** `/api/v1/health` returns `status`, `service`, `version`, `environment`, `deployment`, `database` (hard-coded `false`) and `timestamp`; `/api/v1/info` returns `name`, `api_version`, `framework`, `laravel_version`. The deploy workflow asserts on `status`, `service`, `environment == production`, `deployment.commit` and the three `/info` fields after every release, so changing those keys or values breaks deployment verification. `deployment` is read from `bootstrap/deployment.json` (`{commit, deployed_at}`), which CI generates from `GITHUB_SHA` and which is gitignored locally; when absent it must stay `null`, never an error.
 
 **Tenancy model.** There is no auth or tenant table yet. The tenant is the `X-Client-Code` request header (default `lzhub`), validated against `^[a-z0-9-]+$`, and it only scopes storage paths: `tenants/{tenant}/products/{uuid}.webp`. Any new tenant-aware code should reuse that header and the same slug regex until a real auth/tenant layer exists.
 
-**Storage.** All tenant files go through the `tenant_uploads` disk in `config/filesystems.php`. Its root is `TENANT_UPLOAD_PATH` (local `.env` points at `~/Workspace/mybizgate/uploads/client-api`, i.e. outside this repo and shared with the rest of the workspace), falling back to `storage/app/uploads`. The disk has `throw => true`, so storage failures raise exceptions instead of returning false. Never serve files by building paths from raw user input; `TestUploadController::validatePath()` shows the expected sanitising (tenant regex + `basename` + filename regex).
+**Storage.** All tenant files go through the `tenant_uploads` disk in `config/filesystems.php`. Its root is `TENANT_UPLOAD_PATH` (local `.env` points at `~/Workspace/mybizgate/uploads/client-api`, i.e. outside this repo and shared with the rest of the workspace; the variable is not in `.env.example`), falling back to `storage/app/uploads`. The disk has `throw => true`, so storage failures raise exceptions instead of returning false. Never serve files by building paths from raw user input; `TestUploadController::validatePath()` shows the expected sanitising (tenant regex + `basename` + filename regex).
 
-**Image pipeline.** `App\Http\Controllers\Api\TestUploadController` is the reference implementation: validate `jpg/jpeg/png/webp` up to 10 MB, convert with the GD extension to WebP (max 1600x1600, quality 80, alpha preserved), store under a UUID name, and return `view_url` / `download_url`. The `view` route sets `Cache-Control: public, max-age=86400`. The `/test/*` routes are prototypes expected to be replaced by real product/media endpoints; keep the same conversion and path conventions when doing so.
+**Image pipeline.** `App\Http\Controllers\Api\TestUploadController` is the reference implementation: validate `jpg/jpeg/png/webp` up to 10 MB, convert with the GD extension to WebP (max 1600x1600, quality 80, alpha preserved), store under a UUID name, and return `view_url` / `download_url`. The `view` route sets `Cache-Control: public, max-age=86400`. The `/test/*` routes are prototypes; real media handling belongs to `media-api`, so prefer calling that service over growing this pipeline.
 
-**Database.** sqlite is configured but the API does not use it yet (`/health` hard-codes `database => false`). Only the stock users/cache/jobs migrations exist. The `User` model and `UserFactory` are untouched Laravel defaults.
+**Database.** sqlite is configured but the API does not use it yet. Only the stock users/cache/jobs migrations exist. The `User` model and `UserFactory` are untouched Laravel defaults.
+
+## Deployment
+
+Production is shared hosting with **no SSH**: `.github/workflows/deploy.yml` runs on every push to `deploy` (and on `workflow_dispatch`), then tests, packages and uploads via FTPS. Release flow is `git checkout deploy && git merge main && git push origin deploy`; `main` never auto-deploys.
+
+The workflow, in order: PHP 8.3 with gd; `composer install` (with dev) and `php artisan test` + `route:list` against a throwaway CI `.env`; then `rm -rf vendor` and `composer install --no-dev --optimize-autoloader`; write `bootstrap/deployment.json`; rsync into `deploy/` excluding `.git`, `.github`, `tests/`, `.env*`, `node_modules`, runtime `storage/*` data and `bootstrap/cache/*.php`; FTPS upload with `SamKirkland/FTP-Deploy-Action` to the FTP account root (which is `/home/mybizgat/app/client-api`, `server-dir: ./`); finally poll `/api/v1/health` up to 12x10s until it reports the pushed short SHA, then check `/api/v1/info`. A failing test fails the release, so do not skip or weaken tests to get a deploy through.
+
+Server layout that must not change: Laravel lives at `/home/mybizgat/app/client-api`, the public entry `/home/mybizgat/public_html/client-api/index.php` points at it, and the production `.env` is server-managed and never deployed (`dangerous-clean-slate: false`, `.env*` excluded). Secrets are GitHub environment `production` secrets `FTP_SERVER`, `FTP_USERNAME`, `FTP_PASSWORD`. Production vendor is built in CI; never run Composer on the host.
 
 ## Conventions
 
 - API controllers go in `App\Http\Controllers\Api`; route all endpoints through the `v1` prefix group.
 - Return `response()->json([...], <status>)` with `201` for creations; use `abort_unless`/`abort` for errors so the JSON exception renderer formats them.
+- Nothing returned by `/health` or `/info` may expose absolute paths, `APP_KEY` or credentials.
 - Secrets and real client data never go in this repo. `.env` is local only; `.env.example` is the template.
 - Workspace-wide rules (platform CLI, deploy branches, `clients/client-<slug>/` layout) are in `../AGENTS.md` and `../MYBIZGATE_README.md`.
 
