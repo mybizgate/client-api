@@ -1,5 +1,8 @@
 <?php
 
+use App\Models\ShopCategory;
+use App\Models\ShopProduct;
+
 /*
 |--------------------------------------------------------------------------
 | Media attachments (media-api/attachment_integration.md, option B)
@@ -15,8 +18,11 @@
 
 return [
 
+    // `model` (optional) is checked by AttachmentController: the record must
+    // exist in the resolved site before anything is linked to it.
     'entity_types' => [
-        'product' => ['module' => 'products'],
+        'product' => ['module' => 'products', 'model' => ShopProduct::class],
+        'category' => ['module' => 'categories', 'model' => ShopCategory::class],
         'service' => ['module' => 'services'],
         'business' => ['module' => 'business'],
     ],

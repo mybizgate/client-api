@@ -2,6 +2,8 @@
 
 namespace Database\Factories;
 
+use App\Enums\UserRole;
+use App\Models\Site;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Support\Facades\Hash;
@@ -18,17 +20,22 @@ class UserFactory extends Factory
     protected static ?string $password;
 
     /**
-     * Define the model's default state.
+     * Define the model's default state. `site_id` is required by the tenant
+     * schema, so a Site (and Client) is created unless one is given.
      *
      * @return array<string, mixed>
      */
     public function definition(): array
     {
         return [
+            'site_id' => Site::factory(),
             'name' => fake()->name(),
             'email' => fake()->unique()->safeEmail(),
+            'phone' => null,
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
+            'role' => UserRole::Customer,
+            'status' => User::STATUS_ACTIVE,
             'remember_token' => Str::random(10),
         ];
     }
@@ -41,5 +48,20 @@ class UserFactory extends Factory
         return $this->state(fn (array $attributes) => [
             'email_verified_at' => null,
         ]);
+    }
+
+    public function owner(): static
+    {
+        return $this->state(fn () => ['role' => UserRole::Owner]);
+    }
+
+    public function staff(): static
+    {
+        return $this->state(fn () => ['role' => UserRole::Staff]);
+    }
+
+    public function disabled(): static
+    {
+        return $this->state(fn () => ['status' => 'disabled']);
     }
 }

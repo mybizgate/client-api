@@ -102,26 +102,32 @@ LOG_LEVEL=warning
 
 ### Database schema on production
 
-The deploy never runs migrations. The schema travels as `database/schema/mysql-schema.sql`, generated from the
-local MariaDB with `php artisan schema:dump` (every table plus the rows of the `migrations` table, no data, no
-credentials). Keep `cache`, `session` and `queue` on the file/sync drivers so no extra tables are needed at runtime.
+The deploy never runs migrations. The schema travels as SQL files in `database/schema/`:
+
+- `00_main_structure.sql`: the complete current structure plus the rows of the `migrations` table, generated from a
+  fully migrated local database with `php artisan schema:dump --path=database/schema/00_main_structure.sql` (no
+  data, no credentials). Refreshed after every change. **Fresh installs only**: it starts every table with
+  `DROP TABLE IF EXISTS`, so running it on a live database destroys all data.
+- `00_<task>_<YYYY-MM-DD>.sql`: one file per change (for example `00_core_schema_2026-10-31.sql`), written to be
+  pasted into phpMyAdmin on a live database exactly once. Each file documents how to apply it, creates/alters the
+  tables and ends with the `INSERT INTO migrations` rows so Laravel never re-runs those migrations.
+
+Keep `cache`, `session` and `queue` on the file/sync drivers so no extra tables are needed at runtime.
 
 First install:
 
 1. cPanel → MySQL Databases: create the database and a user, grant the user all privileges on it, put them in the
    production `.env` (`DB_*`).
-2. cPanel → phpMyAdmin → select the database → SQL tab → paste the whole `database/schema/mysql-schema.sql` → Go.
-   **Only on an empty database**: the file starts every table with `DROP TABLE IF EXISTS`, so re-running it on a
-   live database destroys all data.
+2. cPanel → phpMyAdmin → select the database → SQL tab → paste the whole `database/schema/00_main_structure.sql` → Go.
 3. `curl https://client-api.mybizgate.com/api/v1/health` must report `"database": true`.
 
-Every later migration:
+Every later change:
 
-1. Write the migration, then **before** running it locally capture its SQL:
-   `php artisan migrate --pretend` (prints the statements without executing).
-2. `php artisan migrate` locally, then `php artisan schema:dump` and commit the refreshed schema file.
-3. In phpMyAdmin run the captured statements, then record the migration so Laravel never tries to run it again:
-   `INSERT INTO migrations (migration, batch) VALUES ('<file name without .php>', <last batch + 1>);`
-   (the `INSERT` lines at the bottom of the schema file show the exact format).
+1. Write the migration and run `php artisan migrate` locally.
+2. Write `database/schema/00_<task>_<YYYY-MM-DD>.sql` by hand (`php artisan migrate --pretend` prints the raw
+   statements), verify it against the migrations on the spare local database `mybizgat_clientapi` (procedure in
+   `CLAUDE.md`, "Database change procedure"), then regenerate `00_main_structure.sql` and commit all of it.
+3. On production: Export (backup) the database, then phpMyAdmin → SQL tab → paste the task file → Go, once.
+   Check `/api/v1/health` afterwards.
 
 Never run `php artisan migrate:fresh` or `schema:dump --prune`; the migration files stay the source of truth.

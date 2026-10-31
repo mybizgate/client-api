@@ -6,14 +6,18 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreAttachmentRequest;
 use App\Http\Resources\MediaAttachmentResource;
 use App\Models\MediaAttachment;
+use App\Models\Site;
 use App\Services\AttachmentService;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 
 /**
  * Attachments of a business record (media-api/attachment_integration.md).
- * Tenant comes from the `tenant` middleware (X-Client-Code), never from the body.
+ * Tenant comes from the `site` middleware (X-Client-Code), never from the
+ * body; the caller must be owner/staff of that site (`site.staff`). Entity
+ * types with a `model` in config/attachments.php must exist in the site.
  */
 class AttachmentController extends Controller
 {
@@ -21,7 +25,7 @@ class AttachmentController extends Controller
 
     public function index(Request $request, string $entityType, string $entityId): AnonymousResourceCollection
     {
-        $this->assertEntity($entityType, $entityId);
+        $this->assertEntity($request, $entityType, $entityId);
 
         $rows = MediaAttachment::query()
             ->forEntity($this->tenant($request), $entityType, $entityId)
@@ -36,7 +40,7 @@ class AttachmentController extends Controller
 
     public function store(StoreAttachmentRequest $request, string $entityType, string $entityId): JsonResponse
     {
-        $this->assertEntity($entityType, $entityId);
+        $this->assertEntity($request, $entityType, $entityId);
 
         $tenant = $this->tenant($request);
         $role = $request->role();
@@ -73,7 +77,7 @@ class AttachmentController extends Controller
         return (string) $request->attributes->get('tenant');
     }
 
-    private function assertEntity(string $entityType, string $entityId): void
+    private function assertEntity(Request $request, string $entityType, string $entityId): void
     {
         abort_unless(
             array_key_exists($entityType, (array) config('attachments.entity_types')),
@@ -86,5 +90,17 @@ class AttachmentController extends Controller
             422,
             'The entity id may only contain letters, digits, ".", "-" and "_" (max 64).'
         );
+
+        $model = config("attachments.entity_types.{$entityType}.model");
+        $site = $request->attributes->get('site');
+
+        if (is_string($model) && $site instanceof Site) {
+            abort_unless(ctype_digit($entityId), 404, 'Record not found.');
+
+            /** @var class-string<Model> $model */
+            $exists = $model::query()->where('site_id', $site->id)->whereKey((int) $entityId)->exists();
+
+            abort_unless($exists, 404, 'Record not found.');
+        }
     }
 }
