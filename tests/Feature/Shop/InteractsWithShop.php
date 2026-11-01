@@ -91,7 +91,8 @@ trait InteractsWithShop
      */
     protected function guest(?Site $site = null): array
     {
-        $token = str_repeat('a', 63).((string) random_int(0, 9));
+        // Same shape as GuestTokenService::issue(); a single random digit collided within one test.
+        $token = bin2hex(random_bytes(32));
         $profile = ShopCustomerProfile::factory()->withToken($token)->create(['site_id' => ($site ?? $this->site)->id]);
 
         return [$profile, $token];
