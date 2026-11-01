@@ -41,8 +41,10 @@ class OrderWorkflow
     {
         $from = $order->status;
 
+        // Confirmed is also allowed straight from draft_whatsapp: the owner holding the
+        // WhatsApp message is better proof of sending than the customer's own tap.
         $allowed = match ($to) {
-            OrderStatus::Confirmed => $from === OrderStatus::PendingReview,
+            OrderStatus::Confirmed => $from === OrderStatus::PendingReview || $from === OrderStatus::DraftWhatsapp,
             OrderStatus::Processing => $from === OrderStatus::Confirmed,
             OrderStatus::Delivered => $from === OrderStatus::Processing,
             OrderStatus::Completed => $from === OrderStatus::Delivered,
@@ -69,6 +71,7 @@ class OrderWorkflow
                     break;
                 case OrderStatus::Confirmed:
                     $order->confirmed_at = $now;
+                    $order->whatsapp_sent_at ??= $now;
                     $settings = ShopSetting::query()->whereKey($order->site_id)->firstOrFail();
                     $this->stock->deductForOrder($order, $settings, $userId);
                     break;

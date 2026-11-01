@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Shop;
 
+use App\Models\ShopOrder;
 use App\Models\ShopProduct;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -61,6 +62,16 @@ class ManageOrderTest extends TestCase
         $this->assertDatabaseHas('shop_order_status_history', ['status' => 'confirmed', 'actor_type' => 'staff', 'changed_by_user_id' => $this->userId, 'note' => 'Disahkan melalui WhatsApp']);
         $this->assertSame(10, $this->product->refresh()->stock_quantity);
         $this->assertDatabaseCount('shop_inventory_movements', 0);
+    }
+
+    public function test_staff_can_confirm_a_draft_the_customer_never_marked_as_sent(): void
+    {
+        $ref = $this->postJson('/api/v1/orders', $this->draft([['productId' => $this->product->id, 'qty' => 2]]), $this->headers($this->guestToken))->assertCreated()->json('data.id');
+
+        $this->transition($ref, 'processing')->assertStatus(422);
+        $this->transition($ref, 'confirmed', 'Mesej WhatsApp diterima')->assertOk()->assertJsonPath('data.status', 'confirmed')->assertJsonCount(2, 'data.history');
+
+        $this->assertNotNull(ShopOrder::query()->where('reference_no', $ref)->firstOrFail()->whatsapp_sent_at);
     }
 
     public function test_stock_is_deducted_on_confirm_and_restored_on_cancel_when_the_owner_switch_is_on(): void
