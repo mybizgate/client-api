@@ -129,6 +129,11 @@ jobs:
           mkdir -p deploy/storage/framework/views
           mkdir -p deploy/bootstrap/cache
 
+          # Package manifests are path-free and must match the shipped vendor/.
+          # Without them the server keeps the manifest of the previous release
+          # and never registers providers of newly added packages (e.g. Sanctum).
+          cp bootstrap/cache/packages.php bootstrap/cache/services.php deploy/bootstrap/cache/
+
       - name: Verify deployment package
         run: |
           test -f deploy/artisan
@@ -142,8 +147,14 @@ jobs:
           test ! -e deploy/.env
           test ! -e deploy/.env.production
           test ! -e deploy/bootstrap/cache/config.php
+          test ! -e deploy/bootstrap/cache/events.php
+          test -z "$(find deploy/bootstrap/cache -maxdepth 1 -type f -name 'routes-*.php' -print -quit)"
           test ! -d deploy/vendor/phpunit
-          test -z "$(find deploy/bootstrap/cache -maxdepth 1 -type f -name '*.php' -print -quit)"
+
+          test -f deploy/bootstrap/cache/packages.php
+          test -f deploy/bootstrap/cache/services.php
+          grep -q 'laravel/sanctum' deploy/bootstrap/cache/packages.php
+          ! grep -Eq 'laravel/pail|laravel/boost|nunomaduro/collision' deploy/bootstrap/cache/packages.php
 
           du -sh deploy
 
@@ -177,12 +188,16 @@ jobs:
             **/storage/framework/cache/data/**
             **/storage/framework/sessions/**
             **/storage/framework/views/**
-            **/bootstrap/cache/*.php
+            **/bootstrap/cache/config.php
+            **/bootstrap/cache/routes-*.php
+            **/bootstrap/cache/events.php
 
       - name: Verify live production
         env:
           HEALTH_URL: https://client-api.mybizgate.com/api/v1/health
           INFO_URL: https://client-api.mybizgate.com/api/v1/info
+          AUTH_URL: https://client-api.mybizgate.com/api/v1/auth/me
+          SMOKE_CLIENT_CODE: lzhub
         run: |
           EXPECTED="${GITHUB_SHA::8}"
 
@@ -226,3 +241,16 @@ jobs:
               and .api_version == "v1"
               and .framework == "Laravel"
           ' /tmp/client-api-info.json >/dev/null
+
+          # Sanctum guard registered: an unauthenticated staff route answers 401.
+          AUTH_STATUS="$(curl -sS -o /tmp/client-api-auth.json -w '%{http_code}' \
+            -H 'Accept: application/json' \
+            -H "X-Client-Code: ${SMOKE_CLIENT_CODE}" \
+            -H 'Cache-Control: no-cache' \
+            "${AUTH_URL}?nocache=${GITHUB_SHA}")"
+
+          if [ "$AUTH_STATUS" != "401" ]; then
+            echo "Expected 401 from ${AUTH_URL}, got ${AUTH_STATUS}"
+            cat /tmp/client-api-auth.json
+            exit 1
+          fi
