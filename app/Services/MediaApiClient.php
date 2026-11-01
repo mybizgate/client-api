@@ -2,10 +2,13 @@
 
 namespace App\Services;
 
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Response;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 /**
  * HTTP adapter for media-api (media-api/attachment_integration.md §5).
@@ -27,6 +30,35 @@ class MediaApiClient
     public function url(string $path): string
     {
         return rtrim((string) config('services.media_api.base_url'), '/').$path;
+    }
+
+    /**
+     * Runs one media-api call. A connection failure (wrong MEDIA_API_URL, host
+     * blocking outbound HTTP, media-api down) becomes a 502 whose message names
+     * the configured base URL, so operators see the cause instead of a bare 500.
+     *
+     * @param  callable(): Response  $call
+     */
+    private function send(callable $call): Response
+    {
+        try {
+            return $call();
+        } catch (ConnectionException $e) {
+            throw new HttpException(502, 'media-api tidak dapat dihubungi di '.$this->url('').': '.$e->getMessage(), $e);
+        }
+    }
+
+    /** Like Response::throw(), but as a 502 that names the failing media-api URL. */
+    private function ok(Response $response): Response
+    {
+        if ($response->failed()) {
+            $detail = (string) ($response->json('message') ?: $response->reason());
+            $url = (string) ($response->effectiveUri() ?? $this->url(''));
+
+            throw new HttpException(502, "media-api menjawab {$response->status()} untuk {$url}: {$detail}");
+        }
+
+        return $response;
     }
 
     /**
@@ -52,12 +84,12 @@ class MediaApiClient
      */
     public function upload(UploadedFile $file, string $tenant, string $module, ?string $entityId = null): array
     {
-        $response = $this->request($tenant)
+        $response = $this->send(fn () => $this->request($tenant)
             ->attach('file', fopen($file->getRealPath(), 'rb'), $file->getClientOriginalName())
             ->post($this->url('/media'), array_filter([
                 'module' => $module,
                 'entity_id' => $entityId,
-            ]));
+            ])));
 
         if ($response->status() === 422) {
             throw ValidationException::withMessages(
@@ -65,7 +97,7 @@ class MediaApiClient
             );
         }
 
-        $response->throw();
+        $this->ok($response);
 
         return $response->json('data');
     }
@@ -78,13 +110,17 @@ class MediaApiClient
      */
     public function metadata(string $mediaId, string $tenant): array
     {
-        $response = $this->request($tenant)->get($this->url("/media/{$mediaId}/metadata"));
+        $response = $this->send(fn () => $this->request($tenant)->get($this->url("/media/{$mediaId}/metadata")));
 
-        if ($response->status() === 404 || $response->json('data.tenant') !== $tenant) {
+        if ($response->status() === 404) {
             throw ValidationException::withMessages(['media_id' => ['Media not found for this tenant.']]);
         }
 
-        $response->throw();
+        $this->ok($response);
+
+        if ($response->json('data.tenant') !== $tenant) {
+            throw ValidationException::withMessages(['media_id' => ['Media not found for this tenant.']]);
+        }
 
         return $response->json('data');
     }
@@ -96,14 +132,14 @@ class MediaApiClient
      */
     public function assign(string $mediaId, string $tenant, ?string $entityId): array
     {
-        $response = $this->request($tenant)
-            ->patch($this->url("/media/{$mediaId}"), ['entity_id' => $entityId ?? '']);
+        $response = $this->send(fn () => $this->request($tenant)
+            ->patch($this->url("/media/{$mediaId}"), ['entity_id' => $entityId ?? '']));
 
         if ($response->status() === 404) {
             throw ValidationException::withMessages(['media_id' => ['Media not found for this tenant.']]);
         }
 
-        return $response->throw()->json('data');
+        return $this->ok($response)->json('data');
     }
 
     /**
@@ -112,6 +148,6 @@ class MediaApiClient
      */
     public function delete(string $mediaId, string $tenant): void
     {
-        $this->request($tenant)->delete($this->url("/media/{$mediaId}"))->throw();
+        $this->ok($this->send(fn () => $this->request($tenant)->delete($this->url("/media/{$mediaId}"))));
     }
 }
