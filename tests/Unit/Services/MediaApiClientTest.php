@@ -3,10 +3,12 @@
 namespace Tests\Unit\Services;
 
 use App\Services\MediaApiClient;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\TestCase;
 
 class MediaApiClientTest extends TestCase
@@ -142,6 +144,34 @@ class MediaApiClientTest extends TestCase
 
         $this->expectException(ValidationException::class);
         $this->client()->assign(self::MEDIA_ID, 'lzhub', '101');
+    }
+
+    public function test_connection_failure_becomes_a_502_naming_the_configured_url(): void
+    {
+        Http::fake(fn () => throw new ConnectionException('cURL error 7: Failed to connect'));
+
+        try {
+            $this->client()->metadata(self::MEDIA_ID, 'lzhub');
+            $this->fail('Expected an HttpException');
+        } catch (HttpException $e) {
+            $this->assertSame(502, $e->getStatusCode());
+            $this->assertStringContainsString(self::BASE, $e->getMessage());
+            $this->assertStringContainsString('cURL error 7', $e->getMessage());
+        }
+    }
+
+    public function test_media_api_server_error_becomes_a_502_with_the_status_and_url(): void
+    {
+        Http::fake([self::BASE.'/media/'.self::MEDIA_ID => Http::response(['message' => 'Server Error'], 500)]);
+
+        try {
+            $this->client()->assign(self::MEDIA_ID, 'lzhub', '30');
+            $this->fail('Expected an HttpException');
+        } catch (HttpException $e) {
+            $this->assertSame(502, $e->getStatusCode());
+            $this->assertStringContainsString('500', $e->getMessage());
+            $this->assertStringContainsString(self::MEDIA_ID, $e->getMessage());
+        }
     }
 
     public function test_delete_sends_delete_with_tenant_header(): void
