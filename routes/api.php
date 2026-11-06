@@ -1,6 +1,9 @@
 <?php
 
 use App\Http\Controllers\Api\AttachmentController;
+use App\Http\Controllers\Api\Marketing\ProspectController as MarketingProspectController;
+use App\Http\Controllers\Api\Marketing\SummaryController as MarketingSummaryController;
+use App\Http\Controllers\Api\Marketing\TouchController as MarketingTouchController;
 use App\Http\Controllers\Api\SampleController;
 use App\Http\Controllers\Api\Shop\AuthController;
 use App\Http\Controllers\Api\Shop\CategoryController;
@@ -99,6 +102,22 @@ Route::prefix('v1')->group(function () {
 
             Route::delete('/{attachmentId}', [AttachmentController::class, 'destroy'])
                 ->name('api.v1.attachments.destroy');
+        });
+
+        // Marketing prospects of the internal `marketing` site
+        // (../marketing/app-spec/API_CONTRACT.md). `check` and `import` come
+        // before the {id} routes so they are never captured as an id.
+        Route::middleware(['auth:sanctum', 'site.staff'])->prefix('marketing')->name('api.v1.marketing.')->group(function () {
+            Route::get('/summary', MarketingSummaryController::class)->name('summary');
+
+            Route::get('/prospects', [MarketingProspectController::class, 'index'])->name('prospects.index');
+            Route::post('/prospects', [MarketingProspectController::class, 'store'])->name('prospects.store');
+            Route::get('/prospects/check', [MarketingProspectController::class, 'check'])->name('prospects.check');
+            Route::post('/prospects/import', [MarketingProspectController::class, 'import'])->name('prospects.import');
+            Route::get('/prospects/{id}', [MarketingProspectController::class, 'show'])->whereNumber('id')->name('prospects.show');
+            Route::patch('/prospects/{id}', [MarketingProspectController::class, 'update'])->whereNumber('id')->name('prospects.update');
+            Route::delete('/prospects/{id}', [MarketingProspectController::class, 'destroy'])->whereNumber('id')->name('prospects.destroy');
+            Route::post('/prospects/{id}/touches', [MarketingTouchController::class, 'store'])->whereNumber('id')->name('prospects.touches.store');
         });
     });
 
