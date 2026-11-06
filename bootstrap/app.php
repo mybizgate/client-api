@@ -29,6 +29,10 @@ return Application::configure(basePath: dirname(__DIR__))
 
         // Resolve the site (400 / 404 / 403 inactive) before Sanctum answers 401.
         $middleware->prependToPriorityList(AuthenticatesRequests::class, ResolveSite::class);
+
+        // Pure API: an unauthenticated request gets a JSON 401, never a redirect to a
+        // (non-existent) login page, whatever Accept header the client sent.
+        $middleware->redirectGuestsTo(fn (Request $request) => $request->is('api/*') ? null : '/');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
